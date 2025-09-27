@@ -1,6 +1,6 @@
-package com.quantrecon.core_engine.repository;
+package com.quantrecon.api_service.repository;
 
-import com.quantrecon.core_engine.model.ReconciledStrategy;
+import com.quantrecon.api_service.model.ReconciledStrategy;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 

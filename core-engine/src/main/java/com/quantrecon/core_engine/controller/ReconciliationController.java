@@ -1,41 +1,29 @@
 package com.quantrecon.core_engine.controller;
 
-import com.quantrecon.core_engine.model.ReconciledStrategy;
-import com.quantrecon.core_engine.repository.ReconciledStrategyRepository;
-import com.quantrecon.core_engine.service.ReconciliationService;
-import org.springframework.beans.factory.annotation.Autowired;
+import com.quantrecon.core_engine.service.DataProducerService;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
-
-import java.util.List;
 
 @RestController
 public class ReconciliationController {
 
-    private final ReconciliationService reconciliationService;
-    private final ReconciledStrategyRepository repository;
+    private final DataProducerService dataProducerService;
 
-    @Autowired
-    public ReconciliationController(ReconciliationService reconciliationService, ReconciledStrategyRepository repository) {
-        this.reconciliationService = reconciliationService;
-        this.repository = repository;
+    public ReconciliationController(DataProducerService dataProducerService) {
+        this.dataProducerService = dataProducerService;
     }
 
-    @PostMapping("/reconcile")
-    public ResponseEntity<String> startReconciliation() {
+    // This controller's only job is to start the data feed.
+    @PostMapping("/start-producers")
+    public ResponseEntity<String> startProducers() {
         try {
-            reconciliationService.runReconciliation();
-            return ResponseEntity.ok("Reconciliation process completed successfully!");
+            dataProducerService.sendCboeData();
+            dataProducerService.sendLedgerData();
+            return ResponseEntity.ok("Started data producers successfully!");
         } catch (Exception e) {
             e.printStackTrace();
-            return ResponseEntity.internalServerError().body("Error during reconciliation: " + e.getMessage());
+            return ResponseEntity.internalServerError().body("Error starting producers: " + e.getMessage());
         }
-    }
-
-    @GetMapping("/results")
-    public List<ReconciledStrategy> getResults() {
-        return repository.findAll();
     }
 }

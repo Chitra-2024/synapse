@@ -1,141 +1,115 @@
-package com.quantrecon.core_engine.service; // <-- Matching your package name
+package com.quantrecon.core_engine.service;
 
 import com.quantrecon.core_engine.model.ReconciledStrategy;
 import com.quantrecon.core_engine.model.TradeLeg;
 import com.quantrecon.core_engine.repository.ReconciledStrategyRepository;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.ResourceLoader;
+import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class ReconciliationService {
 
     private final ReconciledStrategyRepository repository;
-    private final ResourceLoader resourceLoader; // <-- ADDED THIS
+    private final Map<String, List<TradeLeg>> cboeCache = new ConcurrentHashMap<>();
+    private final Map<String, List<TradeLeg>> ledgerCache = new ConcurrentHashMap<>();
 
-    @Autowired
-    public ReconciliationService(ReconciledStrategyRepository repository, ResourceLoader resourceLoader) { // <-- UPDATED CONSTRUCTOR
+    public ReconciliationService(ReconciledStrategyRepository repository) {
         this.repository = repository;
-        this.resourceLoader = resourceLoader;
     }
 
-    public void runReconciliation() throws IOException {
-        // 1. Read the data from the classpath
-        List<TradeLeg> cboeTrades = readCboeTradesFromClasspath("cboe_exchange_feed.csv");
-        List<TradeLeg> ledgerTrades = readLedgerTradesFromClasspath("internal_ledger.csv");
+    @KafkaListener(topics = "exchange-feed-topic", groupId = "recon-group")
+    public void listenToExchangeFeed(String message) {
+        TradeLeg cboeLeg = parseCboeTrade(message);
+        if (cboeLeg == null) return;
+        cboeCache.computeIfAbsent(cboeLeg.getStrategyHint(), k -> new ArrayList<>()).add(cboeLeg);
+        tryToReconcile(cboeLeg.getStrategyHint());
+    }
 
-        // (The rest of the logic is exactly the same as before)
+    @KafkaListener(topics = "ledger-feed-topic", groupId = "recon-group")
+    public void listenToLedgerFeed(String message) {
+        TradeLeg ledgerLeg = parseLedgerTrade(message);
+        if (ledgerLeg == null) return;
+        ledgerCache.computeIfAbsent(ledgerLeg.getStrategyHint(), k -> new ArrayList<>()).add(ledgerLeg);
+        tryToReconcile(ledgerLeg.getStrategyHint());
+    }
 
-        // 2. Group trades by their strategy identifier for easy lookup
-        Map<String, List<TradeLeg>> cboeStrategyMap = cboeTrades.stream()
-                .collect(Collectors.groupingBy(TradeLeg::getStrategyHint));
-        Map<String, List<TradeLeg>> ledgerStrategyMap = ledgerTrades.stream()
-                .collect(Collectors.groupingBy(TradeLeg::getStrategyHint));
+    private void tryToReconcile(String strategyId) {
+        List<TradeLeg> cboeLegs = cboeCache.get(strategyId);
+        List<TradeLeg> ledgerLegs = ledgerCache.get(strategyId);
 
-        // 3. Loop through internal ledger strategies to find matches
-        for (Map.Entry<String, List<TradeLeg>> ledgerEntry : ledgerStrategyMap.entrySet()) {
-            String strategyId = ledgerEntry.getKey();
-            List<TradeLeg> ledgerLegs = ledgerEntry.getValue();
+        if (cboeLegs == null || ledgerLegs == null) {
+            return;
+        }
+
+        int expectedLegCount = strategyId.startsWith("IC_") ? 4 : 3;
+
+        if (cboeLegs.size() == expectedLegCount && ledgerLegs.size() == expectedLegCount) {
             ReconciledStrategy result = new ReconciledStrategy();
             result.setStrategyId(strategyId);
             result.setLegCount(ledgerLegs.size());
 
-            if (cboeStrategyMap.containsKey(strategyId)) {
-                List<TradeLeg> cboeLegs = cboeStrategyMap.get(strategyId);
+            double totalLedgerPrice = ledgerLegs.stream().mapToDouble(TradeLeg::getPrice).sum();
+            double totalCboePrice = cboeLegs.stream().mapToDouble(TradeLeg::getPrice).sum();
+            double priceDifference = Math.abs(totalLedgerPrice - totalCboePrice);
 
-                if (ledgerLegs.size() != cboeLegs.size()) {
-                    result.setStatus("MISSING_LEG");
-                    result.setNetPriceDifference(0.0);
-                } else {
-                    double totalLedgerPrice = ledgerLegs.stream().mapToDouble(TradeLeg::getPrice).sum();
-                    double totalCboePrice = cboeLegs.stream().mapToDouble(TradeLeg::getPrice).sum();
-                    double priceDifference = Math.abs(totalLedgerPrice - totalCboePrice);
-
-                    result.setNetPriceDifference(priceDifference);
-                    if (priceDifference > 0.1) {
-                        result.setStatus("PRICE_MISMATCH");
-                    } else {
-                        result.setStatus("MATCHED");
-                    }
-                }
-                cboeStrategyMap.remove(strategyId);
+            result.setNetPriceDifference(priceDifference);
+            if (priceDifference > 0.1) {
+                result.setStatus("PRICE_MISMATCH");
             } else {
-                result.setStatus("UNMATCHED_LEDGER");
+                result.setStatus("MATCHED");
             }
             repository.save(result);
-        }
+            System.out.println("Successfully reconciled and saved strategy: " + strategyId);
 
-        // 4. Any remaining strategies in the CBOE map are orphans
-        for (Map.Entry<String, List<TradeLeg>> cboeEntry : cboeStrategyMap.entrySet()) {
-            ReconciledStrategy result = new ReconciledStrategy();
-            result.setStrategyId(cboeEntry.getKey());
-            result.setLegCount(cboeEntry.getValue().size());
-            result.setStatus("UNMATCHED_EXCHANGE");
-            repository.save(result);
+            cboeCache.remove(strategyId);
+            ledgerCache.remove(strategyId);
         }
     }
 
-    // v-- COMPLETELY NEW, MORE RELIABLE METHODS --v
-    
-    private List<TradeLeg> readCboeTradesFromClasspath(String fileName) throws IOException {
-        List<TradeLeg> trades = new ArrayList<>();
-        Resource resource = resourceLoader.getResource("classpath:data/" + fileName);
-        InputStream inputStream = resource.getInputStream();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream))) {
-            br.readLine(); // Skip header
-            String line;
-            while ((line = br.readLine()) != null) {
-                String[] values = line.split(",");
-                TradeLeg leg = new TradeLeg();
-                leg.setId(values[0]);
-                leg.setTimestamp(Instant.parse(values[1]));
-                leg.setStrategyHint(values[2]);
-                leg.setUnderlying(values[3]);
-                leg.setExpiry(values[4]);
-                leg.setStrike(Double.parseDouble(values[5]));
-                leg.setOptionType(values[6]);
-                leg.setSide(values[7]);
-                leg.setPrice(Double.parseDouble(values[8]));
-                leg.setQuantity(Integer.parseInt(values[9]));
-                trades.add(leg);
-            }
+    private TradeLeg parseCboeTrade(String csvLine) {
+        try {
+            String[] values = csvLine.split(",");
+            TradeLeg leg = new TradeLeg();
+            leg.setId(values[0].trim());
+            leg.setTimestamp(Instant.parse(values[1].trim()));
+            leg.setStrategyHint(values[2].trim());
+            leg.setUnderlying(values[3].trim());
+            leg.setExpiry(values[4].trim());
+            leg.setStrike(Double.parseDouble(values[5].trim())); // <-- .trim() ADDED
+            leg.setOptionType(values[6].trim());
+            leg.setSide(values[7].trim());
+            leg.setPrice(Double.parseDouble(values[8].trim()));   // <-- .trim() ADDED
+            leg.setQuantity(Integer.parseInt(values[9].trim())); // <-- .trim() ADDED
+            return leg;
+        } catch (Exception e) {
+            System.err.println("Error parsing CBOE trade: " + csvLine);
+            return null;
         }
-        return trades;
     }
-    
-    private List<TradeLeg> readLedgerTradesFromClasspath(String fileName) throws IOException {
-        List<TradeLeg> trades = new ArrayList<>();
-        Resource resource = resourceLoader.getResource("classpath:data/" + fileName);
-        InputStream inputStream = resource.getInputStream();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(inputStream))) {
-            br.readLine(); // Skip header
-            String line;
-            while ((line = br.readLine()) != null) {
-                String[] values = line.split(",");
-                TradeLeg leg = new TradeLeg();
-                leg.setId(values[0]);
-                leg.setStrategyHint(values[1]); // Using strategyHint to store strategyId for grouping
-                leg.setUnderlying(values[2]);
-                leg.setExpiry(values[3]);
-                leg.setStrike(Double.parseDouble(values[4]));
-                leg.setOptionType(values[5]);
-                leg.setSide(values[6]);
-                leg.setPrice(Double.parseDouble(values[7]));
-                leg.setQuantity(Integer.parseInt(values[8]));
-                trades.add(leg);
-            }
+
+    private TradeLeg parseLedgerTrade(String csvLine) {
+        try {
+            String[] values = csvLine.split(",");
+            TradeLeg leg = new TradeLeg();
+            leg.setId(values[0].trim());
+            leg.setStrategyHint(values[1].trim());
+            leg.setUnderlying(values[2].trim());
+            leg.setExpiry(values[3].trim());
+            leg.setStrike(Double.parseDouble(values[4].trim())); // <-- .trim() ADDED
+            leg.setOptionType(values[5].trim());
+            leg.setSide(values[6].trim());
+            leg.setPrice(Double.parseDouble(values[7].trim()));   // <-- .trim() ADDED
+            leg.setQuantity(Integer.parseInt(values[8].trim())); // <-- .trim() ADDED
+            return leg;
+        } catch (Exception e) {
+            System.err.println("Error parsing Ledger trade: " + csvLine);
+            return null;
         }
-        return trades;
     }
 }
