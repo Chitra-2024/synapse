@@ -18,6 +18,7 @@ public class ReconciledStrategy {
     private String status;
     private Integer legCount;
     private Double netPriceDifference;
+    private Integer quantityDifference;
 
     public Integer getId() {
         return id;
@@ -57,6 +58,14 @@ public class ReconciledStrategy {
 
     public void setNetPriceDifference(Double netPriceDifference) {
         this.netPriceDifference = netPriceDifference;
+    }
+
+    public Integer getQuantityDifference() {
+        return quantityDifference;
+    }
+
+    public void setQuantityDifference(Integer quantityDifference) {
+        this.quantityDifference = quantityDifference;
     }
 }
 

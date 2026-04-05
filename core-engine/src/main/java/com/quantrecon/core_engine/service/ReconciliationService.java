@@ -57,15 +57,25 @@ public class ReconciliationService {
             double totalLedgerPrice = ledgerLegs.stream().mapToDouble(TradeLeg::getPrice).sum();
             double totalCboePrice = cboeLegs.stream().mapToDouble(TradeLeg::getPrice).sum();
             double priceDifference = Math.abs(totalLedgerPrice - totalCboePrice);
+            result.setNetPriceDifference(Math.round(priceDifference * 100.0) / 100.0);
 
-            result.setNetPriceDifference(priceDifference);
-            if (priceDifference > 0.1) {
-                result.setStatus("PRICE_MISMATCH");
+            int totalLedgerQty = ledgerLegs.stream().mapToInt(TradeLeg::getQuantity).sum();
+            int totalCboeQty = cboeLegs.stream().mapToInt(TradeLeg::getQuantity).sum();
+            int quantityDifference = Math.abs(totalLedgerQty - totalCboeQty);
+            result.setQuantityDifference(quantityDifference);
+
+            if (priceDifference > 0.001 ) {
+                result.setStatus("PRICE_BREAK");
+            } else if (quantityDifference > 0) {
+                result.setStatus("QUANTITY_BREAK");
             } else {
                 result.setStatus("MATCHED");
             }
+
             repository.save(result);
-            System.out.println("Successfully reconciled and saved strategy: " + strategyId);
+            System.out.println("Reconciled [" + result.getStatus() + "] " + strategyId
+                + " | ΔPrice: $" + String.format("%.2f", priceDifference)
+                + " | ΔQty: " + quantityDifference);
 
             cboeCache.remove(strategyId);
             ledgerCache.remove(strategyId);
@@ -81,11 +91,11 @@ public class ReconciliationService {
             leg.setStrategyHint(values[2].trim());
             leg.setUnderlying(values[3].trim());
             leg.setExpiry(values[4].trim());
-            leg.setStrike(Double.parseDouble(values[5].trim())); // <-- .trim() ADDED
+            leg.setStrike(Double.parseDouble(values[5].trim())); 
             leg.setOptionType(values[6].trim());
             leg.setSide(values[7].trim());
-            leg.setPrice(Double.parseDouble(values[8].trim()));   // <-- .trim() ADDED
-            leg.setQuantity(Integer.parseInt(values[9].trim())); // <-- .trim() ADDED
+            leg.setPrice(Double.parseDouble(values[8].trim()));     
+            leg.setQuantity(Integer.parseInt(values[9].trim())); 
             return leg;
         } catch (Exception e) {
             System.err.println("Error parsing CBOE trade: " + csvLine);
@@ -101,11 +111,11 @@ public class ReconciliationService {
             leg.setStrategyHint(values[1].trim());
             leg.setUnderlying(values[2].trim());
             leg.setExpiry(values[3].trim());
-            leg.setStrike(Double.parseDouble(values[4].trim())); // <-- .trim() ADDED
+            leg.setStrike(Double.parseDouble(values[4].trim()));
             leg.setOptionType(values[5].trim());
             leg.setSide(values[6].trim());
-            leg.setPrice(Double.parseDouble(values[7].trim()));   // <-- .trim() ADDED
-            leg.setQuantity(Integer.parseInt(values[8].trim())); // <-- .trim() ADDED
+            leg.setPrice(Double.parseDouble(values[7].trim()));   
+            leg.setQuantity(Integer.parseInt(values[8].trim())); 
             return leg;
         } catch (Exception e) {
             System.err.println("Error parsing Ledger trade: " + csvLine);

@@ -7,5 +7,5 @@ import org.springframework.stereotype.Repository;
 
 @Repository
 public interface ReconciledStrategyRepository extends JpaRepository<ReconciledStrategy, Integer> {
-    // Spring Data JPA automatically creates all the database methods for us!
+    
 }
